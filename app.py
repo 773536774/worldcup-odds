@@ -3,8 +3,8 @@ import random
 
 # 页面配置
 st.set_page_config(page_title="世界杯赔率计算器", layout="wide")
-st.title("⚽ 世界杯动态赔率结算系统（风控娱乐版）")
-st.markdown("### 纯积分娱乐 | 无赌博行为")
+st.title("⚽ 世界杯动态赔率结算")
+st.markdown("### TEST")
 st.divider()
 
 # ======================
