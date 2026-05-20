@@ -35,6 +35,10 @@ with st.sidebar:
     INSURANCE_X_WIN = st.number_input("猜对额外获得X_win%", 0.01, 0.5, 0.05, 0.01)
     INSURANCE_X_LOSE = st.number_input("猜错返还X_lose%", 0.01, 0.5, 0.20, 0.01)
 
+    st.subheader("免费保险（竞猜榜日榜奖励）")
+    FREE_INS_COUNT = st.number_input("免费保险人数", 0, 50, 10)
+    FREE_INS_PER_PERSON = st.number_input("每人免费保险次数", 0, 10, 1)
+
 # ======================
 # 下注数据输入
 # ======================
@@ -50,8 +54,11 @@ with c3:
 # 竞猜保险开关
 st.subheader("🛡️ 竞猜保险")
 enable_insurance = st.checkbox("启用竞猜保险（所有下注均购买保险）")
+enable_free_insurance = st.checkbox("启用免费保险（竞猜榜日榜奖励）")
 if enable_insurance:
-    st.info(f"保险费率{INSURANCE_A*100:.0f}% | 猜对额外+{INSURANCE_X_WIN*100:.0f}% | 猜错返还{INSURANCE_X_LOSE*100:.0f}%")
+    st.info(f"付费保险费率{INSURANCE_A*100:.0f}% | 猜对额外+{INSURANCE_X_WIN*100:.0f}% | 猜错返还{INSURANCE_X_LOSE*100:.0f}%")
+if enable_free_insurance:
+    st.info(f"免费保险：日榜前{FREE_INS_COUNT}名，每人{FREE_INS_PER_PERSON}次/天，无需额外金球币，效果等同付费保险")
 
 # 解析输入
 def get_bets(s):
@@ -97,14 +104,14 @@ def calculate_dynamic_odds(base_odds, total_stake, stake_item, all_stakes_list):
     return round(final_odds, 2), round(R, 3), round(H, 3), current_K == K_RISK
 
 
-def calculate_insurance(bet_amount, is_correct):
+def calculate_insurance(bet_amount, is_correct, is_free=False):
     """
     竞猜保险计算
-    保险费 = 下注额 * A%
+    保险费 = 下注额 * A%（免费保险为0）
     猜对：额外获得 = 下注额 * X_win%
     猜错：返还 = 下注额 * X_lose%
     """
-    insurance_cost = bet_amount * INSURANCE_A
+    insurance_cost = 0 if is_free else bet_amount * INSURANCE_A
     if is_correct:
         bonus = bet_amount * INSURANCE_X_WIN
         net_insurance = bonus - insurance_cost
@@ -115,51 +122,77 @@ def calculate_insurance(bet_amount, is_correct):
         return insurance_cost, refund, net_insurance
 
 
-def settle_bets(bet_list, odds, result_type, target_type, total_stake, has_insurance=False):
+def settle_bets(bet_list, odds, result_type, target_type, total_stake, has_insurance=False, free_ins_bets=None):
     rewards = []
     insurance_details = []
     max_total_payout = total_stake * PAYOUT_LIMIT_RATIO
     is_payout_limit = False
 
+    # 计算保险赔付总额（用于风控封顶）
+    total_insurance_payout = 0
+    if has_insurance or free_ins_bets:
+        for i, bet in enumerate(bet_list):
+            is_free = free_ins_bets and i < len(free_ins_bets) and free_ins_bets[i]
+            if result_type == target_type:
+                # 猜对：保险额外 = bet * X_win%
+                ins_payout = bet * INSURANCE_X_WIN
+            else:
+                # 猜错：保险返还 = bet * X_lose%
+                ins_payout = bet * INSURANCE_X_LOSE
+            if is_free:
+                total_insurance_payout += ins_payout  # 免费保险全计入赔付
+            elif has_insurance:
+                # 付费保险：净赔付 = 保险赔付 - 保险费收入
+                total_insurance_payout += ins_payout - bet * INSURANCE_A
+
+    # 调整封顶：总赔付 = 基础赔率赔付 + 保险净赔付
+    max_base_payout = max_total_payout - total_insurance_payout
+
     if result_type == target_type:
         is_correct = True
         raw_rewards = [round(bet * odds, 2) for bet in bet_list]
         total_raw = sum(raw_rewards)
-        if total_raw > max_total_payout:
+        # 封顶判定：基础赔付 + 保险赔付 ≤ 总封顶
+        if total_raw > max_base_payout and max_base_payout > 0:
             is_payout_limit = True
-            shrink_ratio = max_total_payout / total_raw
+            shrink_ratio = max_base_payout / total_raw
             rewards = [round(r * shrink_ratio, 2) for r in raw_rewards]
+        elif max_base_payout <= 0:
+            is_payout_limit = True
+            rewards = [0.0] * len(bet_list)
         else:
             rewards = raw_rewards
 
         # 保险计算（猜对）
-        if has_insurance:
-            for i, bet in enumerate(bet_list):
-                ins_cost, ins_bonus, ins_net = calculate_insurance(bet, is_correct)
-                insurance_details.append({
-                    "bet": bet,
-                    "reward": rewards[i],
-                    "ins_cost": round(ins_cost, 2),
-                    "ins_gain": round(ins_bonus, 2),
-                    "ins_net": round(ins_net, 2),
-                    "total_with_ins": round(rewards[i] + ins_net, 2),
-                })
+        for i, bet in enumerate(bet_list):
+            is_free = free_ins_bets and i < len(free_ins_bets) and free_ins_bets[i]
+            ins_cost, ins_bonus, ins_net = calculate_insurance(bet, is_correct, is_free)
+            insurance_details.append({
+                "bet": bet,
+                "reward": rewards[i],
+                "ins_cost": round(ins_cost, 2),
+                "ins_gain": round(ins_bonus, 2),
+                "ins_net": round(ins_net, 2),
+                "total_with_ins": round(rewards[i] + ins_net, 2),
+                "is_free": is_free,
+            })
     else:
         is_correct = False
         rewards = [0.0] * len(bet_list)
 
         # 保险计算（猜错）
-        if has_insurance:
-            for i, bet in enumerate(bet_list):
-                ins_cost, ins_refund, ins_net = calculate_insurance(bet, is_correct)
-                insurance_details.append({
-                    "bet": bet,
-                    "reward": 0.0,
-                    "ins_cost": round(ins_cost, 2),
-                    "ins_gain": round(ins_refund, 2),
-                    "ins_net": round(ins_net, 2),
-                    "total_with_ins": round(ins_net, 2),  # 猜错只有保险净收益
-                })
+        for i, bet in enumerate(bet_list):
+            is_free = free_ins_bets and i < len(free_ins_bets) and free_ins_bets[i]
+            ins_cost, ins_refund, ins_net = calculate_insurance(bet, is_correct, is_free)
+            insurance_details.append({
+                "bet": bet,
+                "reward": 0.0,
+                "ins_cost": round(ins_cost, 2),
+                "ins_gain": round(ins_refund, 2),
+                "ins_net": round(ins_net, 2),
+                "total_with_ins": round(ins_net, 2),  # 猜错只有保险净收益
+                "is_free": is_free,
+            })
 
     return rewards, is_payout_limit, insurance_details
 
@@ -177,16 +210,41 @@ win_odds, R_win, H_win, is_risk = calculate_dynamic_odds(base_win, total_stake, 
 draw_odds, R_draw, H_draw, _ = calculate_dynamic_odds(base_draw, total_stake, total_draw, all_stakes)
 lose_odds, R_lose, H_lose, _ = calculate_dynamic_odds(base_lose, total_stake, total_lose, all_stakes)
 
+# 生成免费保险标记（前N个用户标记为免费保险）
+def get_free_ins_flags(bet_list, free_count, free_per_person):
+    """标记哪些下注使用了免费保险"""
+    flags = [False] * len(bet_list)
+    free_used = 0
+    for i in range(len(bet_list)):
+        if free_used < free_count * free_per_person:
+            flags[i] = True
+            free_used += 1
+    return flags
+
+win_free = get_free_ins_flags(win_bets, FREE_INS_COUNT, FREE_INS_PER_PERSON) if enable_free_insurance else None
+draw_free = get_free_ins_flags(draw_bets, FREE_INS_COUNT, FREE_INS_PER_PERSON) if enable_free_insurance else None
+lose_free = get_free_ins_flags(lose_bets, FREE_INS_COUNT, FREE_INS_PER_PERSON) if enable_free_insurance else None
+
 # 结算
-win_rewards, is_win_limit, win_ins = settle_bets(win_bets, win_odds, MATCH_RESULT, "win", total_stake, enable_insurance)
-draw_rewards, is_draw_limit, draw_ins = settle_bets(draw_bets, draw_odds, MATCH_RESULT, "draw", total_stake, enable_insurance)
-lose_rewards, is_lose_limit, lose_ins = settle_bets(lose_bets, lose_odds, MATCH_RESULT, "lose", total_stake, enable_insurance)
+win_rewards, is_win_limit, win_ins = settle_bets(win_bets, win_odds, MATCH_RESULT, "win", total_stake, enable_insurance, win_free)
+draw_rewards, is_draw_limit, draw_ins = settle_bets(draw_bets, draw_odds, MATCH_RESULT, "draw", total_stake, enable_insurance, draw_free)
+lose_rewards, is_lose_limit, lose_ins = settle_bets(lose_bets, lose_odds, MATCH_RESULT, "lose", total_stake, enable_insurance, lose_free)
 
 # 计算总收益
 total_reward_base = round(sum(win_rewards) + sum(draw_rewards) + sum(lose_rewards), 2)
 
-if enable_insurance:
+if enable_insurance or enable_free_insurance:
     total_insurance_cost = sum(b * INSURANCE_A for b in win_bets + draw_bets + lose_bets)
+    # 免费保险不收保费，需减去
+    if enable_free_insurance:
+        total_free_ins_bets = sum(
+            b for b, f in zip(win_bets, win_free or []) if f
+        ) + sum(
+            b for b, f in zip(draw_bets, draw_free or []) if f
+        ) + sum(
+            b for b, f in zip(lose_bets, lose_free or []) if f
+        )
+        total_insurance_cost -= total_free_ins_bets * INSURANCE_A
     total_ins_net = 0
     for details in [win_ins, draw_ins, lose_ins]:
         for d in details:
@@ -205,13 +263,15 @@ implied_prob = round(1 / win_odds + 1 / draw_odds + 1 / lose_odds, 3)
 # ======================
 st.subheader("📊 计算结果")
 
-if enable_insurance:
-    a, b, c, d, e = st.columns(5)
+if enable_insurance or enable_free_insurance:
+    a, b, c, d, e, f = st.columns(6)
     a.metric("总押注金额", f"{total_stake:,.0f}")
     b.metric("总保险费", f"{total_insurance_cost:,.0f}")
     c.metric("基础奖金", f"{total_reward_base:,.0f}")
     d.metric("含保险总奖金", f"{total_reward_with_ins:,.0f}")
     e.metric("平台净收益", f"{platform_profit:,.0f}")
+    free_ins_total = FREE_INS_COUNT * FREE_INS_PER_PERSON if enable_free_insurance else 0
+    f.metric("免费保险份数", f"{free_ins_total}")
 else:
     a, b, c = st.columns(3)
     a.metric("总押注金额", f"{total_stake:,.0f}")
@@ -245,18 +305,23 @@ for label, bets, rewards, ins_details, is_limit in [
     limit_tag = " 🔒封顶缩减" if is_limit else ""
     win_tag = " ✅猜对" if is_winner else " ❌猜错"
 
-    if not enable_insurance:
+    if not enable_insurance and not enable_free_insurance:
         st.write(f"**{label}** {len(bets)}人{win_tag}{limit_tag}：{[round(b, 0) for b in bets]} → {[round(r, 2) for r in rewards]}")
     else:
         st.write(f"**{label}** {len(bets)}人{win_tag}{limit_tag}：")
         ins_gain_label = "保险额外" if is_winner else "保险返还"
-        header = f"| 下注 | 基础奖金 | 保险费({INSURANCE_A*100:.0f}%) | {ins_gain_label} | 保险净收益 | 合计到手 |"
-        separator = "|---:|---:|---:|---:|---:|---:|"
+        ins_type_col = " | 类型" if enable_free_insurance else ""
+        header = f"| 下注 | 基础奖金 | 保险费({INSURANCE_A*100:.0f}%) | {ins_gain_label} | 保险净收益 | 合计到手{ins_type_col} |"
+        separator = "|---:|---:|---:|---:|---:|---:|" + ("|---|" if enable_free_insurance else "")
         st.markdown(header)
         st.markdown(separator)
         for d in ins_details:
             net_sign = "+" if d["ins_net"] >= 0 else ""
-            row = f"| {d['bet']:,.0f} | {d['reward']:,.2f} | -{d['ins_cost']:,.2f} | {d['ins_gain']:,.2f} | {net_sign}{d['ins_net']:,.2f} | {d['total_with_ins']:,.2f} |"
+            type_tag = " 🆓免费" if d.get("is_free") else " 💰付费" if enable_insurance else ""
+            if enable_free_insurance:
+                row = f"| {d['bet']:,.0f} | {d['reward']:,.2f} | -{d['ins_cost']:,.2f} | {d['ins_gain']:,.2f} | {net_sign}{d['ins_net']:,.2f} | {d['total_with_ins']:,.2f} |{type_tag} |"
+            else:
+                row = f"| {d['bet']:,.0f} | {d['reward']:,.2f} | -{d['ins_cost']:,.2f} | {d['ins_gain']:,.2f} | {net_sign}{d['ins_net']:,.2f} | {d['total_with_ins']:,.2f} |"
             st.markdown(row)
 
 # 押注热度分布
